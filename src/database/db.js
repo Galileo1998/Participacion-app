@@ -1,23 +1,18 @@
 // src/database/db.js
 import * as SQLite from 'expo-sqlite';
 
-// Variable para guardar la conexión
+// Variable para guardar la conexión (Singleton)
 let dbInstance = null;
 
-
-// src/database/db.js
-
-// ... imports ...
-
+// 1. OBTENER CONEXIÓN
 export const getDBConnection = async () => {
   if (dbInstance) {
     return dbInstance;
   }
 
-  // CAMBIO AQUÍ: Cambiamos el nombre para forzar una base nueva y limpia
-  const db = await SQLite.openDatabaseAsync('participacion_v8_con_firma.db'); 
-  
-  // ... resto del código con los CREATE TABLE ...
+  // IMPORTANTE: He cambiado el nombre a 'v10' para garantizar que se cree 
+  // una base de datos totalmente nueva y limpia en tu celular.
+  const db = await SQLite.openDatabaseAsync('participacion_v10_final.db'); 
   
   dbInstance = db;
   return dbInstance;
@@ -32,6 +27,7 @@ export const initDB = async () => {
     await db.execAsync(`
       PRAGMA journal_mode = WAL;
       
+      -- TABLA 1: ESTUDIANTES
       CREATE TABLE IF NOT EXISTS estudiantes (
         id_nnaj TEXT PRIMARY KEY,
         nombre_completo TEXT,
@@ -41,6 +37,7 @@ export const initDB = async () => {
         municipio TEXT
       );
 
+      -- TABLA 2: PERIODOS
       CREATE TABLE IF NOT EXISTS periodos (
         id INTEGER PRIMARY KEY,
         nombre TEXT,
@@ -48,6 +45,7 @@ export const initDB = async () => {
         fecha_fin TEXT
       );
 
+      -- TABLA 3: ACTIVIDADES
       CREATE TABLE IF NOT EXISTS actividades (
         id INTEGER PRIMARY KEY,
         periodo_id INTEGER,
@@ -56,44 +54,41 @@ export const initDB = async () => {
         marco_logico TEXT
       );
 
-      CREATE TABLE IF NOT EXISTS participaciones (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        id_nnaj TEXT,
-        actividad_id INTEGER,
-        fecha TEXT,
-        mes_nombre TEXT,
-        estado_subida INTEGER DEFAULT 0
-      );
-
+      -- TABLA 4: SESION
       CREATE TABLE IF NOT EXISTS sesion (
         identidad TEXT PRIMARY KEY,
         nombre TEXT,
         ubicacion TEXT,
         ultima_sincronizacion TEXT
       );
-      
-        CREATE TABLE IF NOT EXISTS participaciones (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          id_nnaj TEXT,
-          actividad_id INTEGER,
-          fecha TEXT,         -- Fecha de la actividad (YYYY-MM-DD)
-          mes_nombre TEXT,
-          firma TEXT,
-          timestamp TEXT,     -- NUEVO: Hora exacta del registro
-          coordenadas TEXT,   -- NUEVO: "Lat, Long"
-          estado_subida INTEGER DEFAULT 0 -- 0=Pendiente, 1=Subido
-        );
 
-        CREATE TABLE IF NOT EXISTS mis_clases (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          municipio TEXT,
-          centro TEXT,
-          grado TEXT
-        );
+      -- TABLA 5: MIS CLASES (Asignaciones del Home)
+      CREATE TABLE IF NOT EXISTS mis_clases (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        municipio TEXT,
+        centro TEXT,
+        grado TEXT
+      );
+
+      -- TABLA 6: PARTICIPACIONES (CORREGIDA)
+      -- Esta es la ÚNICA definición de la tabla. Incluye firma, timestamp y coordenadas.
+      CREATE TABLE IF NOT EXISTS participaciones (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id_nnaj TEXT,
+        actividad_id INTEGER,
+        fecha TEXT,         -- Fecha de la actividad (YYYY-MM-DD)
+        mes_nombre TEXT,
+        
+        -- NUEVAS COLUMNAS NECESARIAS
+        firma TEXT,
+        timestamp TEXT,     -- Hora exacta del registro
+        coordenadas TEXT,   -- Ubicación GPS "Lat, Long"
+        estado_subida INTEGER DEFAULT 0 -- 0=Pendiente, 1=Subido
+      );
       
     `);
     
-    console.log("✅ Base de datos local inicializada (Modo WAL)");
+    console.log("✅ Base de datos local inicializada (Modo WAL) - Versión v10");
   } catch (error) {
     console.error("❌ Error iniciando DB:", error);
     throw error;
