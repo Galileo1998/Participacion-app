@@ -105,11 +105,11 @@ export default function LoginScreen({ navigation }) {
       setLoading(false);
       Alert.alert("¡Éxito!", "Datos descargados correctamente.");
       navigation.replace('Home');
-
-    } catch (e) {
-      console.error(e);
-      setLoading(false);
-      Alert.alert("Error", "Ocurrió un error al guardar los datos. Revisa la consola.");
+    // CÓDIGO NUEVO (SINCERO) 🗣️
+    } catch (error) {
+        console.error(error);
+        // Esto mostrará: "Network request failed", "JSON Parse Error", etc.
+        Alert.alert("Atención", error.message || "Error desconocido al conectar.");
     }
   };
 
