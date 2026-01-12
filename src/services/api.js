@@ -2,7 +2,7 @@
 
 // CAMBIA ESTO POR TU IP LOCAL (Ejecuta 'ipconfig' en Windows para verla)
 // No uses 'localhost' si pruebas en celular físico.
-const IP = '192.168.1.43:8081'; // <--- ¡ACTUALIZA ESTO!
+const IP = 'accionhonduras.org'; // <--- ¡ACTUALIZA ESTO!
 
 const BASE_URL = `http://${IP}/participacion/admin/api_sync.php`;
 
