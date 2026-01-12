@@ -1,6 +1,6 @@
 import { MaterialIcons } from '@expo/vector-icons';
-import NetInfo from '@react-native-community/netinfo'; // <--- NUEVA IMPORTACIÓN
-import { useFocusEffect } from '@react-navigation/native'; // Para recargar al volver
+import NetInfo from '@react-native-community/netinfo';
+import { useFocusEffect } from '@react-navigation/native';
 import { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Platform, StyleSheet, Text, ToastAndroid, TouchableOpacity, View } from 'react-native';
 
@@ -12,32 +12,56 @@ export default function ActivitiesScreen({ route, navigation }) {
   
   const [actividades, setActividades] = useState([]);
   const [sincronizando, setSincronizando] = useState(new Set()); 
-  const [isAutoSyncing, setIsAutoSyncing] = useState(false); // Para mostrar loading global si quieres
+  const [isAutoSyncing, setIsAutoSyncing] = useState(false);
 
-  // Recargar datos cada vez que entramos a la pantalla (por si firmaron y volvieron)
   useFocusEffect(
     useCallback(() => {
       cargarActividades();
+      ejecutarLimpiezaAutomatica(); // <--- NUEVA LÍNEA: Limpiar al entrar
     }, [])
   );
 
-  // --- ESCUCHA DE INTERNET (AUTO-SYNC) ---
   useEffect(() => {
-    // Nos suscribimos a los cambios de red
     const unsubscribe = NetInfo.addEventListener(state => {
       if (state.isConnected && state.isInternetReachable) {
-        // ¡VOLVIÓ EL INTERNET! Intentamos subir todo lo pendiente.
         subirTodoLoPendienteAutomaticamente();
       }
     });
-
-    return () => unsubscribe(); // Limpieza al salir
+    return () => unsubscribe();
   }, []);
+
+  // --- 🧹 FUNCIÓN DE LIMPIEZA AUTOMÁTICA (50 DÍAS) ---
+  const ejecutarLimpiezaAutomatica = async () => {
+    try {
+      const db = await getDBConnection();
+      
+      // 1. Calcular la fecha de corte (Hoy - 50 días)
+      const fechaCorte = new Date();
+      fechaCorte.setDate(fechaCorte.getDate() - 50);
+      const fechaCorteStr = fechaCorte.toISOString().split('T')[0];
+
+      // 2. Borrar solo lo que YA SE SUBIÓ y es VIEJO
+      // SQLite devuelve un objeto con la propiedad 'changes' (filas afectadas)
+      const resultado = await db.runAsync(
+        `DELETE FROM participaciones 
+         WHERE estado_subida = 1 
+         AND fecha < ?`,
+        [fechaCorteStr]
+      );
+
+      // Solo mostramos log si borró algo para no llenar la consola
+      if (resultado && resultado.changes > 0) {
+        console.log(`🧹 LIMPIEZA: Se eliminaron ${resultado.changes} firmas antiguas (antes de ${fechaCorteStr}).`);
+      }
+      
+    } catch (e) {
+      console.error("⚠️ Error en autolimpieza:", e);
+    }
+  };
 
   const cargarActividades = async () => {
     try {
       const db = await getDBConnection();
-      // Contamos las pendientes para mostrar visualmente si hay algo por subir
       const resultados = await db.getAllAsync(
         `SELECT a.*, 
          (SELECT COUNT(*) FROM participaciones p WHERE p.actividad_id = a.id AND p.estado_subida = 0) as pendientes
@@ -51,60 +75,37 @@ export default function ActivitiesScreen({ route, navigation }) {
     }
   };
 
-  // --- LÓGICA DE AUTO-SUBIDA GLOBAL ---
   const subirTodoLoPendienteAutomaticamente = async () => {
     try {
       const db = await getDBConnection();
-      
-      // 1. Buscamos TODO lo que tenga estado_subida = 0 (No importa la actividad)
-      const pendientes = await db.getAllAsync(
-        'SELECT * FROM participaciones WHERE estado_subida = 0'
-      );
+      const pendientes = await db.getAllAsync('SELECT * FROM participaciones WHERE estado_subida = 0');
 
       if (pendientes.length > 0) {
-        console.log(`📡 Auto-Sync: Encontradas ${pendientes.length} firmas pendientes.`);
-        
-        // Avisar al usuario discretamente
+        console.log(`📡 Auto-Sync: Subiendo ${pendientes.length} firmas...`);
         if (Platform.OS === 'android') {
-          ToastAndroid.show(`Conexión detectada: Subiendo ${pendientes.length} firmas...`, ToastAndroid.LONG);
+          ToastAndroid.show(`Subiendo ${pendientes.length} pendientes...`, ToastAndroid.LONG);
         }
-
         setIsAutoSyncing(true);
 
-        // 2. Enviar al servidor
         await enviarParticipaciones(pendientes);
 
-        // 3. Marcar como subidas
         await db.withTransactionAsync(async () => {
           for (const p of pendientes) {
-            await db.runAsync(
-              'UPDATE participaciones SET estado_subida = 1 WHERE id = ?',
-              [p.id]
-            );
+            await db.runAsync('UPDATE participaciones SET estado_subida = 1 WHERE id = ?', [p.id]);
           }
         });
 
-        // 4. Refrescar la pantalla
-        console.log("✅ Auto-Sync completado con éxito");
-        if (Platform.OS === 'android') {
-          ToastAndroid.show("¡Sincronización automática completada!", ToastAndroid.SHORT);
-        }
-        cargarActividades(); // Recarga las tarjetas para quitar contadores pendientes
-
-      } else {
-        console.log("📡 Auto-Sync: Nada pendiente por subir.");
+        console.log("✅ Auto-Sync completado");
+        cargarActividades(); 
       }
     } catch (e) {
       console.error("❌ Falló Auto-Sync:", e);
-      // No mostramos alerta intrusiva en auto-sync para no molestar, solo consola/toast
     } finally {
       setIsAutoSyncing(false);
     }
   };
 
-  // --- SINCRONIZACIÓN MANUAL (BOTÓN NUBE) ---
   const handleSincronizarManual = async (actividadId, nombreActividad) => {
-    // (Mantenemos tu lógica manual por si acaso)
     const state = await NetInfo.fetch();
     if (!state.isConnected) {
       Alert.alert("Sin Conexión", "No hay internet para sincronizar.");
@@ -123,7 +124,7 @@ export default function ActivitiesScreen({ route, navigation }) {
       );
 
       if (pendientes.length === 0) {
-        Alert.alert("Al día", "No hay firmas pendientes en esta actividad.");
+        Alert.alert("Al día", "No hay firmas pendientes aquí.");
       } else {
         await enviarParticipaciones(pendientes);
         await db.withTransactionAsync(async () => {
@@ -132,7 +133,7 @@ export default function ActivitiesScreen({ route, navigation }) {
           }
         });
         Alert.alert("¡Éxito!", `Se subieron ${pendientes.length} firmas.`);
-        cargarActividades(); // Refrescar UI
+        cargarActividades();
       }
     } catch (e) {
       Alert.alert("Error", e.message);
@@ -145,12 +146,10 @@ export default function ActivitiesScreen({ route, navigation }) {
 
   const renderItem = ({ item }) => {
     const isSyncing = sincronizando.has(item.id);
-    // ¿Hay pendientes en esta actividad? (Viene de la consulta SQL modificada arriba)
     const hayPendientes = item.pendientes > 0;
 
     return (
       <View style={styles.cardContainer}>
-        {/* IZQUIERDA: INFORMACIÓN */}
         <TouchableOpacity 
           style={styles.cardContent}
           onPress={() => navigation.navigate('StudentList', { 
@@ -171,7 +170,6 @@ export default function ActivitiesScreen({ route, navigation }) {
           <Text style={styles.tapText}>Toque para pasar lista ›</Text>
         </TouchableOpacity>
 
-        {/* DERECHA: BOTÓN SYNC */}
         <TouchableOpacity 
           style={[styles.syncButton, hayPendientes ? styles.syncButtonActive : null]} 
           onPress={() => handleSincronizarManual(item.id, item.nombre_actividad)}
@@ -205,7 +203,7 @@ export default function ActivitiesScreen({ route, navigation }) {
         <View>
             <Text style={styles.headerTitle}>{nombrePeriodo}</Text>
             <Text style={{fontSize: 10, color: '#999'}}>
-              {isAutoSyncing ? "♻️ Sincronizando auto..." : "Modo Automático Activo"}
+              {isAutoSyncing ? "♻️ Sincronizando..." : "Auto-Limpieza Activa"}
             </Text>
         </View>
       </View>
@@ -227,34 +225,14 @@ const styles = StyleSheet.create({
   backText: { color: '#0d6efd', fontSize: 16 },
   headerTitle: { fontSize: 18, fontWeight: 'bold', color: '#333' },
   list: { paddingHorizontal: 15, paddingTop: 15 },
-  
-  cardContainer: { 
-    backgroundColor: 'white', 
-    borderRadius: 10, 
-    marginBottom: 12, 
-    elevation: 2, 
-    flexDirection: 'row', 
-    overflow: 'hidden'
-  },
+  cardContainer: { backgroundColor: 'white', borderRadius: 10, marginBottom: 12, elevation: 2, flexDirection: 'row', overflow: 'hidden' },
   cardContent: { flex: 1, padding: 15 },
-  
-  syncButton: { 
-    width: 70, 
-    backgroundColor: '#f8f9fa', // Color apagado por defecto
-    justifyContent: 'center', 
-    alignItems: 'center',
-    borderLeftWidth: 1,
-    borderLeftColor: '#eee'
-  },
-  syncButtonActive: {
-    backgroundColor: '#0d6efd', // Azul brillante si hay pendientes
-  },
-  
+  syncButton: { width: 70, backgroundColor: '#f8f9fa', justifyContent: 'center', alignItems: 'center', borderLeftWidth: 1, borderLeftColor: '#eee' },
+  syncButtonActive: { backgroundColor: '#0d6efd' },
   syncText: { fontSize: 10, fontWeight: 'bold', marginTop: 4 },
   badgeContainer: { flexDirection: 'row', marginBottom: 8 },
   badge: { backgroundColor: '#fff3cd', color: '#856404', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 4, fontSize: 12, marginRight: 5, fontWeight: 'bold' },
   badgePendiente: { backgroundColor: '#fff', color: '#dc3545', borderWidth: 1, borderColor: '#dc3545', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, fontSize: 10, fontWeight: 'bold' },
-  
   title: { fontSize: 16, fontWeight: 'bold', color: '#333', marginBottom: 10 },
   tapText: { color: '#0d6efd', fontSize: 12, fontWeight: '500' }
 });

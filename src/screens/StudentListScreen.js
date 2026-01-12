@@ -6,6 +6,7 @@ import { ActivityIndicator, Alert, FlatList, Modal, StyleSheet, Text, TextInput,
 import SignatureScreen from "react-native-signature-canvas";
 import { getDBConnection } from '../database/db';
 import { enviarParticipaciones } from '../services/api'; // Servicio de subida
+import { comprimirFirma } from '../utils/compressor'; // <--- IMPORTANTE: Importar el compresor
 
 export default function StudentListScreen({ route, navigation }) {
   // Recibimos los filtros y datos de la actividad
@@ -96,10 +97,14 @@ export default function StudentListScreen({ route, navigation }) {
     }
   };
 
-const handleSignatureOK = async (signature) => {
-    if (!alumnoAFirmar) return;
+  const handleSignatureOK = async (signature) => {
+if (!alumnoAFirmar) return;
     
-    setCargandoFirma(true); 
+    setCargandoFirma(true); // <--- El spinner arranca aquí
+
+    // Hacemos un pequeño "sleep" técnico de 10ms para permitir que 
+    // la interfaz dibuje el spinner antes de congelarse procesando la imagen.
+    await new Promise(resolve => setTimeout(resolve, 10));
 
     try {
       const fechaHora = new Date().toISOString().replace('T', ' ').split('.')[0]; 
@@ -112,17 +117,21 @@ const handleSignatureOK = async (signature) => {
         console.log("GPS no disponible o lento");
       }
 
-      // --- DIAGNÓSTICO: Ver qué estamos enviando ---
-      console.log("Intentando guardar:", {
+      // --- AQUÍ APLICAMOS LA COMPRESIÓN ---
+      // Convertimos la firma gigante en una miniatura ligera antes de guardarla
+      const firmaComprimida = await comprimirFirma(signature);
+
+      // --- DIAGNÓSTICO: Ver cuánto ahorramos ---
+      console.log("Guardando firma:", {
         id: alumnoAFirmar.id_nnaj,
-        actividad: actividadId,
-        periodo: nombrePeriodo, // <--- OJO AQUÍ, probablemente esto sea undefined
-        firma: "Base64..."
+        originalSize: signature.length,
+        compressedSize: firmaComprimida.length // Debería ser mucho menor
       });
 
       const db = await getDBConnection();
       
-      // --- CORRECCIÓN: Usamos '|| null' para evitar undefined ---
+      // --- GUARDAR LOCALMENTE (SQLITE) ---
+      // IMPORTANTE: Guardamos 'firmaComprimida', NO 'signature'
       await db.runAsync(
         `INSERT INTO participaciones (id_nnaj, actividad_id, fecha, mes_nombre, firma, timestamp, coordenadas, estado_subida) 
          VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
@@ -130,20 +139,20 @@ const handleSignatureOK = async (signature) => {
             alumnoAFirmar.id_nnaj || null, 
             actividadId || null, 
             hoy || null, 
-            nombrePeriodo || 'Sin Periodo', // Si es undefined, pone texto por defecto
-            signature || null, 
+            nombrePeriodo || 'Sin Periodo',
+            firmaComprimida || null, // <--- LA VERSIÓN LIGERA
             fechaHora || null, 
             coordenadas || null
         ]
       );
 
-      // Actualizar visualmente
+      // Actualizar visualmente la lista (Check verde)
       const nuevas = new Set(asistencias);
       nuevas.add(alumnoAFirmar.id_nnaj);
       setAsistencias(nuevas);
       setModalVisible(false);
 
-      // INTENTAR SUBIR (Código de red...)
+      // --- INTENTAR SUBIR AL SERVIDOR ---
       const netInfo = await Network.getNetworkStateAsync();
       
       if (netInfo.isConnected && netInfo.isInternetReachable) {
@@ -152,13 +161,14 @@ const handleSignatureOK = async (signature) => {
             actividad_id: actividadId,
             fecha: hoy,
             mes_nombre: nombrePeriodo || 'Sin Periodo',
-            firma: signature,
+            firma: firmaComprimida, // <--- SUBIMOS LA LIGERA (Rápido)
             timestamp: fechaHora,
             coordenadas: coordenadas
         }];
 
         await enviarParticipaciones(paquete);
         
+        // Si subió bien, marcamos como subido localmente
         await db.runAsync(
             'UPDATE participaciones SET estado_subida = 1 WHERE id_nnaj = ? AND actividad_id = ? AND fecha = ?',
             [alumnoAFirmar.id_nnaj, actividadId, hoy]
@@ -169,7 +179,7 @@ const handleSignatureOK = async (signature) => {
       }
 
     } catch (e) {
-      console.error("ERROR AL GUARDAR:", e); // <--- Esto te dirá más detalles en la consola
+      console.error("ERROR AL GUARDAR:", e); 
       Alert.alert("Error Grave", "Fallo al guardar: " + e.message);
       setModalVisible(false);
     } finally {
@@ -214,7 +224,7 @@ const handleSignatureOK = async (signature) => {
         />
       </View>
 
-      {/* Lista de Estudiantes (Diseño Bonito Restaurado) */}
+      {/* Lista de Estudiantes */}
       <FlatList
         data={filtrados}
         keyExtractor={(item) => item.id_nnaj}
