@@ -98,7 +98,7 @@ export default function StudentListScreen({ route, navigation }) {
   };
 
   const handleSignatureOK = async (signature) => {
-if (!alumnoAFirmar) return;
+    if (!alumnoAFirmar) return;
     
     setCargandoFirma(true); // <--- El spinner arranca aquí
 
@@ -110,18 +110,39 @@ if (!alumnoAFirmar) return;
       const fechaHora = new Date().toISOString().replace('T', ' ').split('.')[0]; 
       let coordenadas = "Sin GPS";
       
+      // --- LÓGICA DE GPS OPTIMIZADA (FAST GPS) ---
       try {
-        let location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-        coordenadas = `${location.coords.latitude},${location.coords.longitude}`;
+        // 1. Intento Rápido: ¿El celular ya sabe dónde está? (Instantáneo)
+        let location = await Location.getLastKnownPositionAsync();
+        
+        // 2. Si no sabe, buscamos satélites pero con PACIENCIA LIMITADA (Máximo 4 seg)
+        if (!location) {
+            // Promesa que falla a los 4 segundos
+            const timeout = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error("Timeout GPS")), 4000)
+            );
+            
+            // Promesa del GPS real
+            const gpsPromise = Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+            
+            // Competencia: ¿Quién gana? ¿El GPS o el Reloj?
+            location = await Promise.race([gpsPromise, timeout]);
+        }
+    
+        if (location && location.coords) {
+            coordenadas = `${location.coords.latitude},${location.coords.longitude}`;
+        }
       } catch (e) {
-        console.log("GPS no disponible o lento");
+        console.log("GPS omitido por lentitud o error:", e.message);
+        // No pasa nada, seguimos guardando con "Sin GPS" para no trabar la app
       }
+      // -------------------------------------------
 
-      // --- AQUÍ APLICAMOS LA COMPRESIÓN ---
+      // --- COMPRESIÓN DE FIRMA ---
       // Convertimos la firma gigante en una miniatura ligera antes de guardarla
       const firmaComprimida = await comprimirFirma(signature);
 
-      // --- DIAGNÓSTICO: Ver cuánto ahorramos ---
+      // --- DIAGNÓSTICO ---
       console.log("Guardando firma:", {
         id: alumnoAFirmar.id_nnaj,
         originalSize: signature.length,
@@ -131,7 +152,6 @@ if (!alumnoAFirmar) return;
       const db = await getDBConnection();
       
       // --- GUARDAR LOCALMENTE (SQLITE) ---
-      // IMPORTANTE: Guardamos 'firmaComprimida', NO 'signature'
       await db.runAsync(
         `INSERT INTO participaciones (id_nnaj, actividad_id, fecha, mes_nombre, firma, timestamp, coordenadas, estado_subida) 
          VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
@@ -161,7 +181,7 @@ if (!alumnoAFirmar) return;
             actividad_id: actividadId,
             fecha: hoy,
             mes_nombre: nombrePeriodo || 'Sin Periodo',
-            firma: firmaComprimida, // <--- SUBIMOS LA LIGERA (Rápido)
+            firma: firmaComprimida, // <--- SUBIMOS LA LIGERA
             timestamp: fechaHora,
             coordenadas: coordenadas
         }];
