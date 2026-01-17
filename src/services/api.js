@@ -17,32 +17,41 @@ const PROTOCOLO = 'https'; // Importante: Producción suele requerir HTTPS
 // Asegúrate de que la ruta '/participacion/admin/api_sync.php' sea exacta en tu hosting
 export const API_URL = `${PROTOCOLO}://${DOMINIO}/participacion/admin/api_sync.php`;
 
-
-// --- FUNCIONES ---
-
 /**
- * Función 1: DESCARGAR DATOS (GET)
- * Sirve para el Login y para bajar estudiantes/actividades
+ * FUNCIÓN DE DESCARGA (Sincronizar)
+ * Trae los grados, estudiantes y actividades del servidor.
  */
 export const syncData = async (identidad) => {
     try {
-        console.log(`📡 Conectando a: ${API_URL}?identidad=${identidad}`);
+        // TRUCO ANTI-CACHÉ:
+        // Agregamos la hora actual (_t) para que el celular crea que es una petición nueva
+        // y descargue los datos reales del servidor en lugar de usar la memoria vieja.
+        const cacheBuster = new Date().getTime();
+        const url = `${API_URL}?identidad=${identidad}&_t=${cacheBuster}`;
 
-        const response = await fetch(`${API_URL}?identidad=${identidad}`);
-        
-        // Leemos texto crudo primero para detectar errores HTML
+        console.log(`📡 Descargando datos frescos de: ${url}`);
+
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: {
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache',
+                'Expires': '0'
+            }
+        });
+
         const text = await response.text();
 
         try {
             const json = JSON.parse(text);
             return json;
         } catch (e) {
-            console.error("🔥 El servidor devolvió HTML en vez de JSON:", text);
-            throw new Error(`Error del Servidor: No se recibieron datos válidos. Posible error PHP.`);
+            console.error("🔥 Error: El servidor no devolvió JSON.", text);
+            throw new Error("Error al leer datos del servidor.");
         }
 
     } catch (error) {
-        console.error("❌ Error de conexión (GET):", error);
+        console.error("❌ Error de conexión:", error);
         throw error;
     }
 };

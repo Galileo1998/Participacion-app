@@ -94,3 +94,17 @@ export const initDB = async () => {
     throw error;
   }
 };
+
+// --- AGREGA ESTA NUEVA FUNCIÓN AL FINAL ---
+export const limpiarBaseDeDatos = async () => {
+  const db = await getDBConnection();
+  try {
+    // Borramos solo los estudiantes, respetando las firmas (participaciones)
+    await db.runAsync('DELETE FROM estudiantes');
+    console.log("Tabla de estudiantes vaciada correctamente.");
+    return true;
+  } catch (error) {
+    console.error("Error al limpiar DB:", error);
+    return false;
+  }
+};
