@@ -7,11 +7,14 @@ import { syncData } from '../services/api'; // <--- Importante
 // Al inicio de HomeScreen.js
 import NetInfo from '@react-native-community/netinfo';
 
+
+
 export default function HomeScreen({ navigation }) {
   const [docente, setDocente] = useState(null);
   const [clases, setClases] = useState([]); 
   const [syncing, setSyncing] = useState(false); // Estado para el spinner del botón
-
+// 1. Agrega un nuevo estado para el mensaje
+  const [mensajeSync, setMensajeSync] = useState("Actualizar Datos");
   // Cargar datos al iniciar
   useEffect(() => {
     cargarDatos();
@@ -41,88 +44,106 @@ export default function HomeScreen({ navigation }) {
     }
   };
 
-  // --- FUNCIÓN PODEROSA: RE-SYNC ---
-  const handleReSync = async () => {
+const handleReSync = async () => {
     if (!docente?.identidad) return;
 
-    setSyncing(true); // Activar spinner
+    setSyncing(true);
+    // Cambiamos el mensaje para que el usuario sepa que inició
+    setMensajeSync("📡 Conectando con servidor..."); 
 
     try {
-      console.log("🔄 Iniciando re-sincronización manual...");
-
-      // 1. Descargar datos FRESCOS (gracias al truco en api.js)
+      // PASO A: DESCARGA
       const data = await syncData(docente.identidad);
 
-      if (data.status === 'error') {
-        throw new Error(data.mensaje);
+      if (data.status === 'error') throw new Error(data.mensaje);
+
+      // PASO B: VALIDACIÓN PREVIA (Evita borrar si la descarga vino vacía)
+      if (!data.estudiantes || !Array.isArray(data.estudiantes)) {
+          throw new Error("La descarga se completó, pero no vinieron estudiantes.");
       }
 
-      // 2. Actualizar Base de Datos (Transacción segura)
+      setMensajeSync("💾 Guardando datos..."); // Feedback visual
+
+      // PASO C: GUARDADO SEGURO (El arreglo al NullPointer)
       const db = await getDBConnection();
 
       await db.withTransactionAsync(async () => {
-        console.log("🧹 Limpiando datos viejos...");
-        // Borramos el contenido pero NO la sesión
+        // Limpieza
         await db.runAsync('DELETE FROM mis_clases');
         await db.runAsync('DELETE FROM estudiantes');
         await db.runAsync('DELETE FROM periodos');
         await db.runAsync('DELETE FROM actividades');
 
-        console.log("📥 Insertando datos nuevos...");
-
-        // A. Insertar Clases Nuevas
-        if (data.asignaciones) {
-            for (const clase of data.asignaciones) {
-                await db.runAsync(
-                    'INSERT INTO mis_clases (municipio, centro, grado) VALUES (?, ?, ?)',
-                    [clase.municipio, clase.centro, clase.grado]
-                );
-            }
-        }
-
-        // B. Insertar Estudiantes Nuevos
+        // Insertar Estudiantes (CON PROTECCIÓN NULL)
+        // Usamos ?. y || para asegurar que NUNCA entre un undefined
         if (data.estudiantes) {
             for (const est of data.estudiantes) {
               await db.runAsync(
                 `INSERT INTO estudiantes (id_nnaj, nombre_completo, genero, grado_actual, centro_educativo, municipio) 
                  VALUES (?, ?, ?, ?, ?, ?)`,
-                [est.id_nnaj, est.nombre_completo, est.genero, est.grado_actual, est.centro_educativo, est.municipio]
+                [
+                    est.id_nnaj ? String(est.id_nnaj) : "Sin ID",
+                    est.nombre_completo || "Sin Nombre",
+                    est.genero || "X",
+                    est.grado_actual || "Sin Grado",
+                    est.centro_educativo || "Centro Desconocido",
+                    est.municipio || "Sin Municipio"
+                ]
               );
             }
-        }
-
-        // C. Insertar Periodos y Actividades Nuevas
-        for (const p of data.periodos) {
-          await db.runAsync(
-            'INSERT INTO periodos (id, nombre, fecha_inicio, fecha_fin) VALUES (?, ?, ?, ?)',
-            [p.id, p.nombre, p.fecha_inicio, p.fecha_fin]
-          );
-
-          if (p.lista_actividades) {
-            for (const act of p.lista_actividades) {
-              await db.runAsync(
-                'INSERT INTO actividades (id, periodo_id, nombre_actividad, tipo_actividad, marco_logico) VALUES (?, ?, ?, ?, ?)',
-                [act.id, p.id, act.nombre_actividad, act.tipo_actividad, act.marco_logico]
-              );
-            }
-          }
         }
         
-        // D. Actualizar hora de sincronización
-        await db.runAsync('UPDATE sesion SET ultima_sincronizacion = ?', [new Date().toISOString()]);
+        // ... (Repetir lógica similar para Clases y Actividades si es necesario)
+        // Lo crítico son los estudiantes porque son muchos campos.
+
+        // Insertar Clases
+        if (data.asignaciones) {
+            for (const clase of data.asignaciones) {
+                await db.runAsync(
+                    'INSERT INTO mis_clases (municipio, centro, grado) VALUES (?, ?, ?)',
+                    [
+                        clase.municipio || "", 
+                        clase.centro || "", 
+                        clase.grado || ""
+                    ]
+                );
+            }
+        }
+        
+        // Insertar Periodos y Actividades (Igual lógica de protección)
+        if (data.periodos) {
+            for (const p of data.periodos) {
+                await db.runAsync(
+                    'INSERT INTO periodos (id, nombre, fecha_inicio, fecha_fin) VALUES (?, ?, ?, ?)',
+                    [p.id, p.nombre, p.fecha_inicio || "", p.fecha_fin || ""]
+                );
+                if (p.lista_actividades) {
+                    for (const act of p.lista_actividades) {
+                        await db.runAsync(
+                            'INSERT INTO actividades (id, periodo_id, nombre_actividad, tipo_actividad, marco_logico) VALUES (?, ?, ?, ?, ?)',
+                            [act.id, p.id, act.nombre_actividad || "Sin Nombre", act.tipo_actividad || "", act.marco_logico || ""]
+                        );
+                    }
+                }
+            }
+        }
       });
 
-      // 3. ACTUALIZAR UI
-      setClases([]); // Truco visual: Vaciar lista un microsegundo
-      await cargarDatos(); // Recargar desde SQLite
+      setMensajeSync("✅ ¡Éxito!");
+      setClases([]); 
+      await cargarDatos(); 
       
-      Alert.alert("¡Éxito!", "Datos actualizados. Ahora deberías ver los nuevos grados.");
+      // Pequeña pausa para que lean el éxito
+      setTimeout(() => Alert.alert("Éxito", "Datos actualizados correctamente."), 500);
 
     } catch (e) {
       console.error(e);
-      Alert.alert("Error", "No se pudo actualizar: " + (e.message || "Fallo de red"));
+      setMensajeSync("❌ Error");
+      Alert.alert("Error de Sincronización", "Detalle: " + e.message);
     } finally {
-      setSyncing(false); // Apagar spinner
+      setSyncing(false);
+      // Regresar el texto del botón a la normalidad después de 3 seg
+      setTimeout(() => setMensajeSync("🔄 Actualizar Datos"), 3000);
     }
   };
 
@@ -224,15 +245,22 @@ const cerrarSesion = async () => {
               </Text>
               
               {/* BOTÓN DE ACTUALIZAR DATOS */}
+              {/* BOTÓN MANUAL DE SINCRONIZAR */}
               <TouchableOpacity 
-                style={styles.syncButton} 
+                style={[
+                    styles.syncButton, 
+                    syncing && { backgroundColor: '#ffc107' } // Se pone amarillo mientras carga
+                ]} 
                 onPress={handleReSync} 
                 disabled={syncing}
               >
                 {syncing ? (
-                    <ActivityIndicator size="small" color="#fff" />
+                    <View style={{flexDirection: 'row', alignItems: 'center'}}>
+                        <ActivityIndicator size="small" color="#000" style={{marginRight:5}} />
+                        <Text style={[styles.syncText, {color: '#000'}]}>{mensajeSync}</Text>
+                    </View>
                 ) : (
-                    <Text style={styles.syncText}>🔄 Actualizar Datos</Text>
+                    <Text style={styles.syncText}>{mensajeSync}</Text>
                 )}
               </TouchableOpacity>
             </View>

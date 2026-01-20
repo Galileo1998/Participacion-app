@@ -1,24 +1,38 @@
 // src/screens/StudentListScreen.js
-import * as Location from 'expo-location'; // GPS
-import * as Network from 'expo-network'; // Internet
+import * as Location from 'expo-location';
+import * as Network from 'expo-network';
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, FlatList, Modal, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Alert,
+  FlatList,
+  Modal,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
+} from 'react-native';
 import SignatureScreen from "react-native-signature-canvas";
+
 import { getDBConnection } from '../database/db';
-import { enviarParticipaciones } from '../services/api'; // Servicio de subida
-import { comprimirFirma } from '../utils/compressor'; // <--- IMPORTANTE: Importar el compresor
+import { enviarParticipaciones } from '../services/api';
+import { comprimirFirma } from '../utils/compressor';
 
 export default function StudentListScreen({ route, navigation }) {
-  // Recibimos los filtros y datos de la actividad
+  // Protección: Si route.params es undefined, usamos un objeto vacío para no crashear
   const { actividadId, nombreActividad, nombrePeriodo, filtroCentro, filtroGrado } = route.params || {};
 
   const [estudiantes, setEstudiantes] = useState([]);
   const [filtrados, setFiltrados] = useState([]);
   const [asistencias, setAsistencias] = useState(new Set());
   const [busqueda, setBusqueda] = useState('');
-  const [cargandoFirma, setCargandoFirma] = useState(false); // Spinner al guardar
+  
+  // ESTADOS DE CARGA (Para evitar pantalla blanca)
+  const [cargandoDatos, setCargandoDatos] = useState(true); 
+  const [cargandoFirma, setCargandoFirma] = useState(false);
 
-  // Estados para la Modal de Firma
+  // Estados Modal
   const [modalVisible, setModalVisible] = useState(false);
   const [alumnoAFirmar, setAlumnoAFirmar] = useState(null);
   
@@ -26,22 +40,38 @@ export default function StudentListScreen({ route, navigation }) {
   const hoy = new Date().toISOString().split('T')[0];
 
   useEffect(() => {
+    // Validar que tenemos los datos mínimos necesarios antes de intentar cargar
+    if (!actividadId || !filtroCentro) {
+        Alert.alert("Error de Navegación", "Faltan datos del centro o actividad.");
+        navigation.goBack();
+        return;
+    }
     cargarDatos();
     pedirPermisosGPS();
   }, []);
 
   const pedirPermisosGPS = async () => {
-    let { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== 'granted') {
-      console.log('Permiso de GPS denegado (se usará "Sin GPS")');
+    try {
+        let { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') console.log('GPS denegado');
+    } catch (e) {
+        console.log("Error solicitando GPS (ignorable)");
     }
   };
 
   const cargarDatos = async () => {
+    setCargandoDatos(true); // Empieza a girar el spinner
     try {
       const db = await getDBConnection();
 
-      // 1. Cargar Estudiantes (Usamos UPPER/TRIM para evitar errores de texto)
+      // 🛡️ BLINDAJE CONTRA PANTALLA BLANCA 🛡️
+      if (!db) {
+        Alert.alert("Error de Base de Datos", "No se pudo abrir la conexión local.");
+        navigation.goBack();
+        return;
+      }
+
+      // 1. Cargar Estudiantes
       const todos = await db.getAllAsync(
         `SELECT * FROM estudiantes 
          WHERE TRIM(UPPER(centro_educativo)) = TRIM(UPPER(?)) 
@@ -55,14 +85,17 @@ export default function StudentListScreen({ route, navigation }) {
 
       // 2. Cargar Asistencias de HOY
       const asistenciasHoy = await db.getAllAsync(
-        'SELECT id_nnaj FROM participaciones WHERE actividad_id = ? AND fecha = ?', 
+        'SELECT estudiante_id FROM participaciones WHERE actividad_id = ? AND fecha = ?', 
         [actividadId, hoy]
       );
-      setAsistencias(new Set(asistenciasHoy.map(a => a.id_nnaj)));
+      
+      setAsistencias(new Set(asistenciasHoy.map(a => a.estudiante_id)));
 
     } catch (e) {
       console.error("Error cargando datos:", e);
-      Alert.alert("Error", "No se pudieron cargar los estudiantes.");
+      Alert.alert("Error", "Ocurrió un problema al leer la lista de estudiantes.");
+    } finally {
+      setCargandoDatos(false); // Termina de cargar (quita el spinner)
     }
   };
 
@@ -75,13 +108,10 @@ export default function StudentListScreen({ route, navigation }) {
     }
   };
 
-  // --- LÓGICA DE INTERACCIÓN ---
-
   const handlePressEstudiante = async (estudiante) => {
     const yaAsistio = asistencias.has(estudiante.id_nnaj);
 
     if (yaAsistio) {
-      // Si ya firmó, opción de borrar
       Alert.alert(
         "Eliminar Asistencia",
         `¿Borrar asistencia de ${estudiante.nombre_completo}?`,
@@ -91,7 +121,6 @@ export default function StudentListScreen({ route, navigation }) {
         ]
       );
     } else {
-      // Si no ha firmado, abrir modal
       setAlumnoAFirmar(estudiante);
       setModalVisible(true);
     }
@@ -100,102 +129,72 @@ export default function StudentListScreen({ route, navigation }) {
   const handleSignatureOK = async (signature) => {
     if (!alumnoAFirmar) return;
     
-    setCargandoFirma(true); // <--- El spinner arranca aquí
-
-    // Hacemos un pequeño "sleep" técnico de 10ms para permitir que 
-    // la interfaz dibuje el spinner antes de congelarse procesando la imagen.
+    setCargandoFirma(true); 
     await new Promise(resolve => setTimeout(resolve, 10));
 
     try {
       const fechaHora = new Date().toISOString().replace('T', ' ').split('.')[0]; 
       let coordenadas = "Sin GPS";
       
-      // --- LÓGICA DE GPS OPTIMIZADA (FAST GPS) ---
       try {
-        // 1. Intento Rápido: ¿El celular ya sabe dónde está? (Instantáneo)
         let location = await Location.getLastKnownPositionAsync();
-        
-        // 2. Si no sabe, buscamos satélites pero con PACIENCIA LIMITADA (Máximo 4 seg)
         if (!location) {
-            // Promesa que falla a los 4 segundos
-            const timeout = new Promise((_, reject) => 
-                setTimeout(() => reject(new Error("Timeout GPS")), 4000)
-            );
-            
-            // Promesa del GPS real
+            const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout GPS")), 4000));
             const gpsPromise = Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-            
-            // Competencia: ¿Quién gana? ¿El GPS o el Reloj?
             location = await Promise.race([gpsPromise, timeout]);
         }
-    
         if (location && location.coords) {
             coordenadas = `${location.coords.latitude},${location.coords.longitude}`;
         }
       } catch (e) {
-        console.log("GPS omitido por lentitud o error:", e.message);
-        // No pasa nada, seguimos guardando con "Sin GPS" para no trabar la app
+        console.log("GPS omitido:", e.message);
       }
-      // -------------------------------------------
 
-      // --- COMPRESIÓN DE FIRMA ---
-      // Convertimos la firma gigante en una miniatura ligera antes de guardarla
       const firmaComprimida = await comprimirFirma(signature);
-
-      // --- DIAGNÓSTICO ---
-      console.log("Guardando firma:", {
-        id: alumnoAFirmar.id_nnaj,
-        originalSize: signature.length,
-        compressedSize: firmaComprimida.length // Debería ser mucho menor
-      });
-
       const db = await getDBConnection();
+
+      if (!db) throw new Error("Base de datos no disponible");
       
-      // --- GUARDAR LOCALMENTE (SQLITE) ---
       await db.runAsync(
-        `INSERT INTO participaciones (id_nnaj, actividad_id, fecha, mes_nombre, firma, timestamp, coordenadas, estado_subida) 
+        `INSERT INTO participaciones (estudiante_id, actividad_id, fecha, mes, firma, timestamp_registro, coordenadas, estado_subida) 
          VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
         [
-            alumnoAFirmar.id_nnaj || null, 
-            actividadId || null, 
-            hoy || null, 
-            nombrePeriodo || 'Sin Periodo',
-            firmaComprimida || null, // <--- LA VERSIÓN LIGERA
-            fechaHora || null, 
-            coordenadas || null
+            alumnoAFirmar.id_nnaj, 
+            actividadId, 
+            hoy, 
+            nombrePeriodo || 'Sin Periodo', 
+            firmaComprimida, 
+            fechaHora, 
+            coordenadas
         ]
       );
 
-      // Actualizar visualmente la lista (Check verde)
       const nuevas = new Set(asistencias);
       nuevas.add(alumnoAFirmar.id_nnaj);
       setAsistencias(nuevas);
       setModalVisible(false);
 
-      // --- INTENTAR SUBIR AL SERVIDOR ---
       const netInfo = await Network.getNetworkStateAsync();
-      
       if (netInfo.isConnected && netInfo.isInternetReachable) {
         const paquete = [{
-            id_nnaj: alumnoAFirmar.id_nnaj,
+            estudiante_id: alumnoAFirmar.id_nnaj,
             actividad_id: actividadId,
             fecha: hoy,
-            mes_nombre: nombrePeriodo || 'Sin Periodo',
-            firma: firmaComprimida, // <--- SUBIMOS LA LIGERA
-            timestamp: fechaHora,
+            mes: nombrePeriodo || 'Sin Periodo',
+            firma: firmaComprimida,
+            timestamp_registro: fechaHora,
             coordenadas: coordenadas
         }];
 
         await enviarParticipaciones(paquete);
         
-        // Si subió bien, marcamos como subido localmente
         await db.runAsync(
-            'UPDATE participaciones SET estado_subida = 1 WHERE id_nnaj = ? AND actividad_id = ? AND fecha = ?',
+            'UPDATE participaciones SET estado_subida = 1 WHERE estudiante_id = ? AND actividad_id = ? AND fecha = ?',
             [alumnoAFirmar.id_nnaj, actividadId, hoy]
         );
         Alert.alert("✅ Sincronizado", "Asistencia subida.");
       } else {
-        Alert.alert("💾 Guardado Offline", "Sin internet. Se guardó en el celular.");
+        Alert.alert("💾 Guardado Offline", "Se guardó en el celular.");
       }
 
     } catch (e) {
@@ -211,8 +210,10 @@ export default function StudentListScreen({ route, navigation }) {
   const borrarAsistencia = async (id_estudiante) => {
     try {
       const db = await getDBConnection();
+      if (!db) return;
+
       await db.runAsync(
-        'DELETE FROM participaciones WHERE actividad_id = ? AND id_nnaj = ? AND fecha = ?',
+        'DELETE FROM participaciones WHERE actividad_id = ? AND estudiante_id = ? AND fecha = ?',
         [actividadId, id_estudiante, hoy]
       );
       const nuevas = new Set(asistencias);
@@ -226,16 +227,23 @@ export default function StudentListScreen({ route, navigation }) {
 
   const styleFirma = `.m-signature-pad--footer {display: none; margin: 0px;}`;
 
+  // --- VISTA DE CARGA (Para evitar pantalla blanca) ---
+  if (cargandoDatos) {
+    return (
+        <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
+            <ActivityIndicator size="large" color="#0d6efd" />
+            <Text style={{marginTop: 10, color: '#666'}}>Cargando estudiantes...</Text>
+        </View>
+    );
+  }
+
   return (
     <View style={styles.container}>
-      {/* Encabezado */}
       <View style={styles.header}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
             <Text style={styles.backText}>‹ Volver</Text>
         </TouchableOpacity>
-        
         <Text style={styles.headerTitle} numberOfLines={1}>{nombreActividad}</Text>
-        
         <TextInput 
             style={styles.searchInput} 
             placeholder="🔍 Buscar estudiante..." 
@@ -244,7 +252,6 @@ export default function StudentListScreen({ route, navigation }) {
         />
       </View>
 
-      {/* Lista de Estudiantes */}
       <FlatList
         data={filtrados}
         keyExtractor={(item) => item.id_nnaj}
@@ -268,12 +275,11 @@ export default function StudentListScreen({ route, navigation }) {
         contentContainerStyle={styles.list}
         ListEmptyComponent={
           <Text style={{textAlign: 'center', marginTop: 40, color: '#999'}}>
-            {estudiantes.length === 0 ? "No se encontraron estudiantes." : "No hay coincidencias con la búsqueda."}
+            {estudiantes.length === 0 ? "No se encontraron estudiantes para este Centro/Grado." : "No hay coincidencias."}
           </Text>
         }
       />
 
-      {/* MODAL DE FIRMA */}
       <Modal visible={modalVisible} animationType="slide" transparent={false} onRequestClose={() => setModalVisible(false)}>
         <View style={styles.modalContainer}>
           <View style={styles.modalHeader}>
