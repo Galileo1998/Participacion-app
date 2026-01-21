@@ -1,24 +1,39 @@
 // src/database/db.js
 import * as SQLite from 'expo-sqlite';
 
-// Variable Singleton
+// Variable Singleton Real
 let dbInstance = null;
+let connectionPromise = null; // 🔒 El "Semáforo" para evitar choques
 
 export const getDBConnection = async () => {
-  try {
-    if (dbInstance) {
-      return dbInstance;
-    }
-    
-    // 🔥 CAMBIO CLAVE: Usamos 'v2' para ignorar la base de datos vieja y rota
-    dbInstance = await SQLite.openDatabaseAsync('participacion_ah_v2.db');
-    
-    await initDB(dbInstance);
+  // 1. Si ya tenemos base de datos lista, la entregamos rápido
+  if (dbInstance) {
     return dbInstance;
-  } catch (error) {
-    console.error("🔥 ERROR CRÍTICO OBTENIENDO CONEXIÓN:", error);
-    return null;
   }
+
+  // 2. Si ya se está abriendo (está en proceso), esperamos a esa misma operación
+  // Esto evita que se intente abrir 2 veces al mismo tiempo (Race Condition)
+  if (connectionPromise) {
+    return await connectionPromise;
+  }
+
+  // 3. Si no, iniciamos la apertura y activamos el semáforo
+  connectionPromise = (async () => {
+    try {
+      // 🔥 Usamos 'v2' para asegurar estructura limpia
+      const db = await SQLite.openDatabaseAsync('participacion_ah_v2.db');
+      await initDB(db);
+      dbInstance = db; // Guardamos la instancia global
+      return db;
+    } catch (error) {
+      console.error("🔥 ERROR CRÍTICO OBTENIENDO CONEXIÓN:", error);
+      return null;
+    } finally {
+      connectionPromise = null; // Liberamos el semáforo
+    }
+  })();
+
+  return await connectionPromise;
 };
 
 export const initDB = async (db = null) => {
@@ -63,7 +78,6 @@ export const initDB = async (db = null) => {
     `);
 
     // 4. Tabla ESTUDIANTES
-    // Aquí está la columna 'id_nnaj' que antes no te reconocía
     await database.execAsync(`
       CREATE TABLE IF NOT EXISTS estudiantes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -116,8 +130,6 @@ export const initDB = async (db = null) => {
         FOREIGN KEY (actividad_id) REFERENCES actividades (id)
       );
     `);
-    
-    // console.log("✅ Base de datos v2 inicializada");
 
   } catch (error) {
     console.error("❌ Error en initDB:", error);

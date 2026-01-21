@@ -1,26 +1,23 @@
 // src/screens/HomeScreen.js
 import { useFocusEffect } from '@react-navigation/native';
 import { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, FlatList, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { getDBConnection } from '../database/db';
-import { syncData } from '../services/api'; // <--- Importante
-// Al inicio de HomeScreen.js
+// IMPORTANTE: Importamos RefreshControl
 import NetInfo from '@react-native-community/netinfo';
-
-
+import { ActivityIndicator, Alert, FlatList, RefreshControl, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { getDBConnection } from '../database/db';
+import { syncData } from '../services/api';
 
 export default function HomeScreen({ navigation }) {
   const [docente, setDocente] = useState(null);
   const [clases, setClases] = useState([]); 
-  const [syncing, setSyncing] = useState(false); // Estado para el spinner del botón
-// 1. Agrega un nuevo estado para el mensaje
+  const [syncing, setSyncing] = useState(false);
+  const [refreshing, setRefreshing] = useState(false); // Estado para el "Pull to Refresh"
   const [mensajeSync, setMensajeSync] = useState("Actualizar Datos");
-  // Cargar datos al iniciar
+
   useEffect(() => {
     cargarDatos();
   }, []);
 
-  // Recargar datos cada vez que volvemos a esta pantalla (por si acaso)
   useFocusEffect(
     useCallback(() => {
       cargarDatos();
@@ -31,51 +28,55 @@ export default function HomeScreen({ navigation }) {
     try {
       const db = await getDBConnection();
       
+      // 🛡️ BLINDAJE: Si la DB falló al iniciar, no intentamos leer para evitar pantalla blanca
+      if (!db) return; 
+      
       // 1. Cargar Docente
       const sessionData = await db.getFirstAsync('SELECT * FROM sesion');
       setDocente(sessionData);
 
       // 2. Cargar Clases
       const clasesData = await db.getAllAsync('SELECT * FROM mis_clases');
-      setClases(clasesData);
+      setClases(clasesData || []); 
       
     } catch (e) {
       console.error("Error cargando Home:", e);
     }
   };
 
-const handleReSync = async () => {
+  // Función para cuando el usuario desliza hacia abajo
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await cargarDatos(); // Recarga la DB local
+    setRefreshing(false); // Apaga el spinner superior
+  }, []);
+
+  const handleReSync = async () => {
     if (!docente?.identidad) return;
 
     setSyncing(true);
-    // Cambiamos el mensaje para que el usuario sepa que inició
-    setMensajeSync("📡 Conectando con servidor..."); 
+    setMensajeSync("📡 Conectando..."); 
 
     try {
-      // PASO A: DESCARGA
       const data = await syncData(docente.identidad);
 
       if (data.status === 'error') throw new Error(data.mensaje);
 
-      // PASO B: VALIDACIÓN PREVIA (Evita borrar si la descarga vino vacía)
       if (!data.estudiantes || !Array.isArray(data.estudiantes)) {
           throw new Error("La descarga se completó, pero no vinieron estudiantes.");
       }
 
-      setMensajeSync("💾 Guardando datos..."); // Feedback visual
+      setMensajeSync("💾 Guardando...");
 
-      // PASO C: GUARDADO SEGURO (El arreglo al NullPointer)
       const db = await getDBConnection();
+      if (!db) throw new Error("Error de conexión local (DB).");
 
       await db.withTransactionAsync(async () => {
-        // Limpieza
         await db.runAsync('DELETE FROM mis_clases');
         await db.runAsync('DELETE FROM estudiantes');
         await db.runAsync('DELETE FROM periodos');
         await db.runAsync('DELETE FROM actividades');
 
-        // Insertar Estudiantes (CON PROTECCIÓN NULL)
-        // Usamos ?. y || para asegurar que NUNCA entre un undefined
         if (data.estudiantes) {
             for (const est of data.estudiantes) {
               await db.runAsync(
@@ -92,25 +93,16 @@ const handleReSync = async () => {
               );
             }
         }
-        
-        // ... (Repetir lógica similar para Clases y Actividades si es necesario)
-        // Lo crítico son los estudiantes porque son muchos campos.
 
-        // Insertar Clases
         if (data.asignaciones) {
             for (const clase of data.asignaciones) {
                 await db.runAsync(
                     'INSERT INTO mis_clases (municipio, centro, grado) VALUES (?, ?, ?)',
-                    [
-                        clase.municipio || "", 
-                        clase.centro || "", 
-                        clase.grado || ""
-                    ]
+                    [clase.municipio || "", clase.centro || "", clase.grado || ""]
                 );
             }
         }
         
-        // Insertar Periodos y Actividades (Igual lógica de protección)
         if (data.periodos) {
             for (const p of data.periodos) {
                 await db.runAsync(
@@ -132,9 +124,7 @@ const handleReSync = async () => {
       setMensajeSync("✅ ¡Éxito!");
       setClases([]); 
       await cargarDatos(); 
-      
-      // Pequeña pausa para que lean el éxito
-      setTimeout(() => Alert.alert("Éxito", "Datos actualizados correctamente."), 500);
+      setTimeout(() => Alert.alert("Éxito", "Datos actualizados."), 500);
 
     } catch (e) {
       console.error(e);
@@ -142,27 +132,21 @@ const handleReSync = async () => {
       Alert.alert("Error de Sincronización", "Detalle: " + e.message);
     } finally {
       setSyncing(false);
-      // Regresar el texto del botón a la normalidad después de 3 seg
       setTimeout(() => setMensajeSync("🔄 Actualizar Datos"), 3000);
     }
   };
 
-const cerrarSesion = async () => {
+  const cerrarSesion = async () => {
     try {
-      // 1. VERIFICACIÓN DE INTERNET 📡
-      // Si no hay red, prohibimos salir para evitar el bloqueo.
       const netState = await NetInfo.fetch();
       if (!netState.isConnected || !netState.isInternetReachable) {
-        Alert.alert(
-          "⚠️ No tienes Internet",
-          "Si cierras sesión ahora, NO podrás volver a entrar hasta que tengas señal.\n\nPor seguridad, no puedes salir en este momento."
-        );
-        return; // <--- Bloqueamos la acción aquí
+        Alert.alert("⚠️ No tienes Internet", "Por seguridad, no puedes salir sin internet.");
+        return;
       }
 
-      // 2. VERIFICACIÓN DE DATOS PENDIENTES 💾
-      // Buscamos si hay firmas sin subir en la base de datos.
       const db = await getDBConnection();
+      if (!db) { Alert.alert("Error", "Fallo DB Local"); return; }
+
       const resultado = await db.getFirstAsync(
         'SELECT COUNT(*) as cantidad FROM participaciones WHERE estado_subida = 0'
       );
@@ -170,17 +154,13 @@ const cerrarSesion = async () => {
       const pendientes = resultado?.cantidad || 0;
 
       if (pendientes > 0) {
-        Alert.alert(
-          "⚠️ Tienes datos sin sincronizar",
-          `Hay ${pendientes} firmas/asistencias guardadas en este teléfono que NO se han subido.\n\nSi cierras sesión, SE BORRARÁN.\n\nPrimero usa el botón "Sincronizar" en cada actividad.`
-        );
-        return; // <--- Bloqueamos la acción aquí
+        Alert.alert("⚠️ Datos sin subir", `Tienes ${pendientes} firmas pendientes. Sincroniza primero.`);
+        return;
       }
 
-      // 3. CONFIRMACIÓN FINAL (Solo si pasó las pruebas anteriores)
       Alert.alert(
         "Cerrar Sesión",
-        "¿Estás seguro? Se borrarán los datos locales de este dispositivo.",
+        "Se borrarán los datos locales.",
         [
           { text: "Cancelar", style: "cancel" },
           { 
@@ -188,26 +168,21 @@ const cerrarSesion = async () => {
             style: "destructive",
             onPress: async () => {
               try {
-                // Ahora sí es seguro borrar
                 await db.runAsync('DELETE FROM sesion');
                 await db.runAsync('DELETE FROM mis_clases');
                 await db.runAsync('DELETE FROM estudiantes');
                 await db.runAsync('DELETE FROM periodos');
                 await db.runAsync('DELETE FROM actividades');
                 await db.runAsync('DELETE FROM participaciones');
-                
                 navigation.reset({ index: 0, routes: [{ name: 'Login' }] });
-              } catch (e) {
-                console.error(e);
-              }
+              } catch (e) { console.error(e); }
             }
           }
         ]
       );
 
     } catch (e) {
-      console.error("Error al intentar cerrar sesión:", e);
-      Alert.alert("Error", "Ocurrió un problema al verificar el estado del teléfono.");
+      console.error("Error al cerrar sesión:", e);
     }
   };
 
@@ -235,7 +210,6 @@ const cerrarSesion = async () => {
 
   return (
     <View style={styles.container}>
-      {/* HEADER AZUL */}
       <View style={styles.header}>
         <View style={styles.headerRow}>
             <View>
@@ -244,13 +218,8 @@ const cerrarSesion = async () => {
                 {docente ? docente.nombre : 'Cargando...'}
               </Text>
               
-              {/* BOTÓN DE ACTUALIZAR DATOS */}
-              {/* BOTÓN MANUAL DE SINCRONIZAR */}
               <TouchableOpacity 
-                style={[
-                    styles.syncButton, 
-                    syncing && { backgroundColor: '#ffc107' } // Se pone amarillo mientras carga
-                ]} 
+                style={[styles.syncButton, syncing && { backgroundColor: '#ffc107' }]} 
                 onPress={handleReSync} 
                 disabled={syncing}
               >
@@ -278,10 +247,13 @@ const cerrarSesion = async () => {
         keyExtractor={(item, index) => index.toString()}
         renderItem={renderCard}
         contentContainerStyle={styles.list}
+        // 👇 ESTA ES LA CLAVE: Permite deslizar hacia abajo para "desatascar" la app
+        refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={["#0d6efd"]} />
+        }
         ListEmptyComponent={
             <Text style={{textAlign:'center', marginTop: 50, color:'#999'}}>
-                No tienes grados asignados.{"\n"}
-                Contacta al administrador.
+                {clases === null ? "Cargando..." : "No tienes grados asignados.\nDesliza hacia abajo para recargar."}
             </Text>
         }
       />
@@ -305,8 +277,6 @@ const styles = StyleSheet.create({
   },
   welcome: { color: '#e0e0e0', fontSize: 14 },
   docenteName: { color: 'white', fontSize: 20, fontWeight: 'bold', maxWidth: 200, marginBottom: 10 }, 
-  
-  // Estilo del botón de Sync
   syncButton: {
     backgroundColor: 'rgba(0,0,0,0.2)',
     paddingVertical: 8,
@@ -316,12 +286,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center'
   },
-  syncText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '600'
-  },
-
+  syncText: { color: '#fff', fontSize: 12, fontWeight: '600' },
   logoutButton: {
     backgroundColor: 'rgba(255,255,255,0.2)',
     paddingVertical: 8,
@@ -329,11 +294,7 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     marginTop: 5
   },
-  logoutText: {
-    color: 'white',
-    fontWeight: 'bold',
-    fontSize: 14,
-  },
+  logoutText: { color: 'white', fontWeight: 'bold', fontSize: 14 },
   sectionTitle: { fontSize: 18, fontWeight: 'bold', margin: 20, marginBottom: 10, color: '#333' },
   list: { paddingHorizontal: 20, paddingBottom: 20 },
   card: { backgroundColor: 'white', padding: 20, borderRadius: 12, marginBottom: 12, flexDirection: 'row', alignItems: 'center', elevation: 2 },

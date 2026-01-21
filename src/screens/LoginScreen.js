@@ -1,6 +1,6 @@
 // src/screens/LoginScreen.js
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { getDBConnection } from '../database/db';
 import { syncData } from '../services/api';
 
@@ -12,9 +12,13 @@ export default function LoginScreen({ navigation }) {
     const checkSesion = async () => {
       try {
         const db = await getDBConnection();
-        const result = await db.getFirstAsync('SELECT * FROM sesion');
-        if (result) {
-          navigation.replace('Home');
+        // Verificar sesión existente
+        if (db) {
+             const result = await db.getFirstAsync("SELECT name FROM sqlite_master WHERE type='table' AND name='sesion'");
+             if (result) {
+                 const sesion = await db.getFirstAsync('SELECT * FROM sesion');
+                 if (sesion) navigation.replace('Home');
+             }
         }
       } catch (e) {
         console.log("Sin sesión previa o error DB:", e);
@@ -32,17 +36,16 @@ export default function LoginScreen({ navigation }) {
     setLoading(true);
 
     try {
-      // 1. Descargar datos del servidor
+      // 1. Descarga (con Timeout de 60s incluido en api.js)
       const data = await syncData(identidad);
 
       if (data.status === 'error') {
-        Alert.alert("Error Servidor", data.mensaje);
-        setLoading(false);
-        return;
+        throw new Error(data.mensaje || "El servidor rechazó la conexión.");
       }
 
-      // 2. Guardar en SQLite
+      // 2. Guardado Local
       const db = await getDBConnection();
+      if (!db) throw new Error("No se pudo abrir la base de datos local.");
 
       await db.withTransactionAsync(async () => {
         // A. Guardar Sesión
@@ -52,7 +55,7 @@ export default function LoginScreen({ navigation }) {
           [identidad, data.docente.nombre, "Docente Activo", new Date().toISOString()]
         );
 
-        // B. Guardar Asignaciones (Clases)
+        // B. Guardar Asignaciones
         await db.runAsync('DELETE FROM mis_clases');
         if (data.asignaciones) {
             for (const clase of data.asignaciones) {
@@ -63,73 +66,94 @@ export default function LoginScreen({ navigation }) {
             }
         }
 
-        // C. Guardar Estudiantes (¡CORREGIDO AQUÍ!)
+        // C. Guardar Estudiantes
         await db.runAsync('DELETE FROM estudiantes');
-        for (const est of data.estudiantes) {
-          // Antes faltaban centro_educativo y municipio, por eso se guardaban como NULL
-          await db.runAsync(
-            `INSERT INTO estudiantes (id_nnaj, nombre_completo, genero, grado_actual, centro_educativo, municipio) 
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [
-                est.id_nnaj, 
-                est.nombre_completo, 
-                est.genero, 
-                est.grado_actual, 
-                est.centro_educativo, // <--- Dato crucial agregado
-                est.municipio         // <--- Dato crucial agregado
-            ]
-          );
+        if (data.estudiantes) {
+            for (const est of data.estudiantes) {
+            await db.runAsync(
+                `INSERT INTO estudiantes (id_nnaj, nombre_completo, genero, grado_actual, centro_educativo, municipio) 
+                VALUES (?, ?, ?, ?, ?, ?)`,
+                [
+                    est.id_nnaj, 
+                    est.nombre_completo, 
+                    est.genero, 
+                    est.grado_actual, 
+                    est.centro_educativo, 
+                    est.municipio
+                ]
+            );
+            }
         }
 
         // D. Guardar Periodos y Actividades
         await db.runAsync('DELETE FROM periodos');
         await db.runAsync('DELETE FROM actividades');
         
-        for (const p of data.periodos) {
-          await db.runAsync(
-            'INSERT INTO periodos (id, nombre, fecha_inicio, fecha_fin) VALUES (?, ?, ?, ?)',
-            [p.id, p.nombre, p.fecha_inicio, p.fecha_fin]
-          );
+        if (data.periodos) {
+            for (const p of data.periodos) {
+            await db.runAsync(
+                'INSERT INTO periodos (id, nombre, fecha_inicio, fecha_fin) VALUES (?, ?, ?, ?)',
+                [p.id, p.nombre, p.fecha_inicio, p.fecha_fin]
+            );
 
-          if (p.lista_actividades) {
-            for (const act of p.lista_actividades) {
-              await db.runAsync(
-                'INSERT INTO actividades (id, periodo_id, nombre_actividad, tipo_actividad, marco_logico) VALUES (?, ?, ?, ?, ?)',
-                [act.id, p.id, act.nombre_actividad, act.tipo_actividad, act.marco_logico]
-              );
+            if (p.lista_actividades) {
+                for (const act of p.lista_actividades) {
+                await db.runAsync(
+                    'INSERT INTO actividades (id, periodo_id, nombre_actividad, tipo_actividad, marco_logico) VALUES (?, ?, ?, ?, ?)',
+                    [act.id, p.id, act.nombre_actividad, act.tipo_actividad, act.marco_logico]
+                );
+                }
             }
-          }
+            }
         }
       });
 
-      setLoading(false);
       Alert.alert("¡Éxito!", "Datos descargados correctamente.");
       navigation.replace('Home');
-    // CÓDIGO NUEVO (SINCERO) 🗣️
+
     } catch (error) {
-        console.error(error);
-        // Esto mostrará: "Network request failed", "JSON Parse Error", etc.
-        Alert.alert("Atención", error.message || "Error desconocido al conectar.");
+        console.error("Error en Login:", error);
+        
+        let mensaje = error.message || "Error desconocido.";
+        if (mensaje.includes("Network request failed")) mensaje = "No hay conexión a internet.";
+        
+        Alert.alert("Atención", mensaje);
+    
+    } finally {
+        // 🔥 ESTA ES LA CLAVE: Siempre apaga el spinner, pase lo que pase.
+        setLoading(false); 
     }
   };
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Acción Honduras AF-26</Text>
-      <Text style={styles.subtitle}>Asistencia Offline</Text>
+      {/* LOGO AGREGADO */}
+      <Image 
+        source={require('../../assets/icon.png')} 
+        style={styles.logo}
+        resizeMode="contain"
+      />
+      <Text style={styles.subtitle}>Asistencia</Text>
 
       <View style={styles.card}>
         <Text style={styles.label}>Identidad Docente</Text>
         <TextInput 
             style={styles.input} 
-            placeholder="Ingrese identidad" 
+            placeholder="Ingrese identidad (sin guiones)" 
             keyboardType="numeric"
             value={identidad}
             onChangeText={setIdentidad}
         />
         
-        <TouchableOpacity style={styles.btn} onPress={handleLogin} disabled={loading}>
-            {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.btnText}>SINCRONIZAR</Text>}
+        <TouchableOpacity style={[styles.btn, loading && styles.btnDisabled]} onPress={handleLogin} disabled={loading}>
+            {loading ? (
+                <View style={{flexDirection: 'row', alignItems: 'center'}}>
+                    <ActivityIndicator color="#fff" style={{marginRight: 10}}/>
+                    <Text style={styles.btnText}>CONECTANDO...</Text>
+                </View>
+            ) : (
+                <Text style={styles.btnText}>SINCRONIZAR</Text>
+            )}
         </TouchableOpacity>
       </View>
     </View>
@@ -138,11 +162,13 @@ export default function LoginScreen({ navigation }) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#f0f2f5', padding: 20 },
+  logo: { width: 150, height: 150, marginBottom: 20 }, // Estilo del Logo
   title: { fontSize: 24, fontWeight: 'bold', color: '#0d6efd', marginBottom: 5 },
   subtitle: { fontSize: 16, color: '#6c757d', marginBottom: 30 },
   card: { backgroundColor: 'white', width: '100%', padding: 20, borderRadius: 10, elevation: 5 },
   label: { fontWeight: 'bold', marginBottom: 5 },
   input: { borderWidth: 1, borderColor: '#ddd', borderRadius: 8, padding: 12, marginBottom: 20 },
   btn: { backgroundColor: '#198754', padding: 15, borderRadius: 8, alignItems: 'center' },
+  btnDisabled: { backgroundColor: '#a5d6a7' },
   btnText: { color: 'white', fontWeight: 'bold' }
 });

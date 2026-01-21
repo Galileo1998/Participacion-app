@@ -174,13 +174,21 @@ export default function StudentListScreen({ route, navigation }) {
       setAsistencias(nuevas);
       setModalVisible(false);
 
+// En src/screens/StudentListScreen.js
+
+      // ... código anterior de guardar local ...
+
+      // --- INTENTAR SUBIR AL SERVIDOR ---
       const netInfo = await Network.getNetworkStateAsync();
       if (netInfo.isConnected && netInfo.isInternetReachable) {
+        
+        // CORRECCIÓN AQUÍ:
+        // Para el servidor usamos 'id_nnaj' (nombre viejo), aunque localmente sea 'estudiante_id'
         const paquete = [{
-            estudiante_id: alumnoAFirmar.id_nnaj,
+            id_nnaj: alumnoAFirmar.id_nnaj, // <--- ANTES DECÍA estudiante_id, CÁMBIALO A id_nnaj
             actividad_id: actividadId,
             fecha: hoy,
-            mes: nombrePeriodo || 'Sin Periodo',
+            mes: nombrePeriodo || 'Sin Periodo', // Asegúrate que tu servidor espera 'mes' o 'mes_nombre'
             firma: firmaComprimida,
             timestamp_registro: fechaHora,
             coordenadas: coordenadas
@@ -188,13 +196,12 @@ export default function StudentListScreen({ route, navigation }) {
 
         await enviarParticipaciones(paquete);
         
+        // Actualizamos localmente (Aquí sí usamos estudiante_id porque es la base local)
         await db.runAsync(
             'UPDATE participaciones SET estado_subida = 1 WHERE estudiante_id = ? AND actividad_id = ? AND fecha = ?',
             [alumnoAFirmar.id_nnaj, actividadId, hoy]
         );
         Alert.alert("✅ Sincronizado", "Asistencia subida.");
-      } else {
-        Alert.alert("💾 Guardado Offline", "Se guardó en el celular.");
       }
 
     } catch (e) {
